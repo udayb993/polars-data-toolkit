@@ -1,36 +1,14 @@
-# Virtual environment - NEVER commit
+__pycache__/
+*.pyc
+.pytest_cache/
 .venv/
 venv/
-env/
-ENV/
-
-# Python cache
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-
-# Pytest cache
-.pytest_cache/
-.cache/
-
-# All generated data files - always local only
-data/raw/
-data/staged/
-data/marts/
-
-# Keep folder structure but not data
-!data/raw/.gitkeep
-!data/staged/.gitkeep
-!data/marts/.gitkeep
-
-# IDE
+.env
 .vscode/
 .idea/
-*.DS_Store
-*.swp
-
-# Logs
-*.log
-logs/
+data/bronze/
+data/silver/
+data/intermediate/
+data/marts/
+data/reports/
+*.parquet
