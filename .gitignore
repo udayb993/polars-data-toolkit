@@ -1,0 +1,39 @@
+# Virtual environment - NEVER commit these
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache - NEVER commit these
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Pytest cache
+.pytest_cache/
+.cache/
+
+# Generated data files - these are generated locally, not committed
+data/*.csv
+data/*.parquet
+
+# IDE files
+.vscode/
+.idea/
+*.DS_Store
+*.swp
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
