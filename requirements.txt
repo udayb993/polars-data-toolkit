@@ -1,3 +1,4 @@
 polars
-faker
+httpx
 pytest
+faker
