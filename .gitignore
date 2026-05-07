@@ -1,39 +1,36 @@
-# Virtual environment - NEVER commit these
+# Virtual environment - NEVER commit
 .venv/
 venv/
 env/
 ENV/
 
-# Python cache - NEVER commit these
+# Python cache
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
 *.so
 
 # Pytest cache
 .pytest_cache/
 .cache/
 
-# Generated data files - these are generated locally, not committed
-data/*.csv
-data/*.parquet
+# All generated data files - always local only
+data/raw/
+data/staged/
+data/marts/
 
-# IDE files
+# Keep folder structure but not data
+!data/raw/.gitkeep
+!data/staged/.gitkeep
+!data/marts/.gitkeep
+
+# IDE
 .vscode/
 .idea/
 *.DS_Store
 *.swp
 
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-*.egg
-
-# Jupyter
-.ipynb_checkpoints/
-
 # Logs
 *.log
+logs/
