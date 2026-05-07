@@ -34,6 +34,8 @@ def main() -> int:
     parser.add_argument("--skip-intermediate", action="store_true")
     parser.add_argument("--skip-marts", action="store_true")
     parser.add_argument("--skip-reports", action="store_true")
+    parser.add_argument("--skip-duckdb", action="store_true",
+                        help="skip rebuilding data/lake.duckdb (requires duckdb installed)")
     args = parser.parse_args()
 
     setup()
@@ -53,6 +55,15 @@ def main() -> int:
     _run("intermediate", intermediate_runner.run_all)
     _run("marts", marts_runner.run_all)
     _run("reports", write_reports)
+
+    if not args.skip_duckdb and not args.layer:
+        try:
+            from scripts.build_duckdb import build as build_duckdb
+            ts = time.perf_counter()
+            build_duckdb()
+            print(f"[duckdb] done in {time.perf_counter() - ts:.1f}s")
+        except ModuleNotFoundError:
+            print("[duckdb] skipped (install with: pip install -r requirements-dev.txt)")
 
     print(f"[total] {time.perf_counter() - t0:.1f}s")
     return 0
