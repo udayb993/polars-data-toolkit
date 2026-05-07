@@ -109,14 +109,31 @@ python scripts/run_pipeline.py
 ## Tests
 
 ```powershell
-pytest -q
+python -m pytest -q                                  # quick run (~3s, 176 tests)
+python -m pytest                                     # verbose, per-test progress
+python -m pytest tests/silver/test_results.py        # one file
+python -m pytest tests/silver/                       # one layer
+python -m pytest -k "qualifying or pole"             # filter by keyword
 ```
 
-Covers:
-- **Schema / smoke**: every silver table exists, has expected keys, no duplicate keys (`tests/test_silver.py`).
-- **Referential integrity**: every FK resolves (`tests/test_referential_integrity.py`).
-- **Business rules**: champion has max points, cumulative points are monotonic, rolling rates are bounded, teammate-pair uniqueness (`tests/test_business_rules.py`).
-- **SQL context**: marts queryable with `pl.SQLContext` (`tests/test_analytics_sql.py`).
+> If `pytest` alone is not recognized in PowerShell, use `python -m pytest`. The pip-installed `pytest.exe` shim lives in your user `Scripts/` folder which may not be on `PATH`.
+
+The suite is organised **one test module per table** under `tests/silver/`, `tests/intermediate/`, and `tests/marts/`. Each table gets at least three checks covering:
+
+- **Primary-key uniqueness** — `(race_id, driver_id)`, `(season, constructor_id)`, etc.
+- **Schema / dtype** — every key column has the expected `pl.Int32`, `pl.Date`, `pl.Duration("us")`, `pl.Enum`, ...
+- **Null discipline** — required key columns are non-null; nullable measure columns are documented.
+- **Value ranges** — positions in `1..30`, points in `0..26`, lap_time medians in `60..130s`, lat/lon bounded, etc.
+- **Allowed-value sets** — `status_category` is one of 6 enum members, `circuit_id` is snake_case, driver `code` matches `^[A-Z]{3}$`.
+- **Cross-table arithmetic** — `positions_gained == grid - finish`, `total_overperformance == points - expected`, race_id derives from `season_round`.
+- **Sequence properties** — `cumulative_points` monotonic per (season, driver), `stop_number` dense per (race, driver), standings dense `1..N` per season.
+
+Plus cross-cutting suites:
+- **Referential integrity** — every FK in fact tables resolves against its dimension.
+- **Business rules** — champion has max points, rolling rates ∈ [0, 1], teammate-pair uniqueness.
+- **Analytics SQL** — `pl.SQLContext` registers all marts and a sample query runs.
+
+A session-scoped fixture in `tests/conftest.py` builds the lake once (only fetching missing bronze tables), so the whole suite runs in a few seconds against a populated `data/`.
 
 ## Project layout
 
