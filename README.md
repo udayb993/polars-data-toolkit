@@ -2,24 +2,6 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
----
-
-## ⚠️ IMPORTANT: Never run `git add .`
-
-**NEVER use `git add .` — always add files explicitly.**
-
-The `.venv/` folder and all data CSVs are in `.gitignore` and must never be committed.
-Large venv folders can exceed GitHub's 100MB file size limit, causing push failures.
-
-```bash
-# ✅ GOOD: Add files explicitly
-git add README.md requirements.txt pipelines/
-
-# ❌ BAD: Never use this
-git add .
-```
-
----
 
 ## Project Overview
 
