@@ -135,6 +135,70 @@ Plus cross-cutting suites:
 
 A session-scoped fixture in `tests/conftest.py` builds the lake once (only fetching missing bronze tables), so the whole suite runs in a few seconds against a populated `data/`.
 
+## Exploring the data
+
+The pipeline writes parquet files; you have a few ways to query them.
+
+### Polars (no extra deps)
+
+```python
+import polars as pl
+pl.read_parquet("data/silver/results.parquet").filter(pl.col("season") == 2023)
+```
+
+### Polars SQL (no extra deps)
+
+```python
+from analytics import sql_context
+ctx = sql_context()
+ctx.execute("SELECT season, driver_champion FROM season_summary").collect()
+```
+
+### DuckDB (recommended for ad-hoc SQL & the DuckDB UI)
+
+Install once:
+
+```powershell
+pip install -r requirements-dev.txt
+```
+
+Build a metadata-only DuckDB file that exposes each layer as a **schema** and each parquet as a **view**:
+
+```powershell
+python scripts/build_duckdb.py
+# wrote data/lake.duckdb
+```
+
+`run_pipeline.py` rebuilds it automatically at the end of a full run (pass `--skip-duckdb` to opt out).
+
+Then query:
+
+```powershell
+duckdb data/lake.duckdb           # CLI
+duckdb -ui data/lake.duckdb       # browser UI: sidebar shows bronze/silver/intermediate/marts schemas
+```
+
+```sql
+-- one row per layer / view count
+SELECT table_schema, COUNT(*) FROM information_schema.tables
+WHERE table_type = 'VIEW' GROUP BY 1;
+
+-- top overperformers across all seasons
+SELECT season, driver_id, total_overperformance
+FROM marts.driver_overperformance
+ORDER BY total_overperformance DESC LIMIT 10;
+
+-- join across layers
+SELECT r.race_name, d.full_name, res.points
+FROM silver.results res
+JOIN silver.races   r USING (race_id)
+JOIN silver.drivers d USING (driver_id)
+WHERE res.finish_position = 1 AND r.season = 2023
+ORDER BY r.round;
+```
+
+The views point at the parquet files via `read_parquet(...)`, so `data/lake.duckdb` stays tiny (~50 KB) and always reflects the latest pipeline output without re-importing.
+
 ## Project layout
 
 ```
