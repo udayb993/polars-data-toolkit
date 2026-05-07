@@ -1,138 +1,43 @@
-"""Shared pytest fixtures for all tests."""
-import json
+"""Pytest fixtures: build the lake once per session.
+
+Tests run against an isolated per-session lake by overriding the env
+``SEASONS`` to ``2023`` (single season → fast).  We re-use any pre-built
+bronze parquet files in the user's ``data/bronze`` directory if present;
+otherwise we re-fetch.
+"""
+from __future__ import annotations
+
+import os
+import sys
 from pathlib import Path
+
 import pytest
-import polars as pl
+
+# Make project root importable.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+# Force a small, deterministic season set BEFORE importing config.
+os.environ.setdefault("SEASONS", "2023")
 
 
-# ============================================================================
-# RAW DATA FIXTURES (from extract layer)
-# ============================================================================
+@pytest.fixture(scope="session", autouse=True)
+def _build_lake():
+    """Build silver/intermediate/marts once per pytest session.
 
-@pytest.fixture
-def raw_products():
-    """Load raw products JSON from data/raw/products_raw.json."""
-    filepath = Path(__file__).parent.parent / "data" / "raw" / "products_raw.json"
-    if not filepath.exists():
-        pytest.skip(f"Raw file not found: {filepath} - run extract step first")
-    with open(filepath, "r") as f:
-        return json.load(f)
+    Bronze is only re-fetched if missing — speeds up local iteration.
+    """
+    from bronze import extract  # noqa: WPS433
+    from common.io import path_for  # noqa: WPS433
+    from intermediate import runner as intermediate_runner  # noqa: WPS433
+    from marts import runner as marts_runner  # noqa: WPS433
+    from silver import runner as silver_runner  # noqa: WPS433
 
-
-@pytest.fixture
-def raw_users():
-    """Load raw users JSON from data/raw/users_raw.json."""
-    filepath = Path(__file__).parent.parent / "data" / "raw" / "users_raw.json"
-    if not filepath.exists():
-        pytest.skip(f"Raw file not found: {filepath} - run extract step first")
-    with open(filepath, "r") as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def raw_carts():
-    """Load raw carts JSON from data/raw/carts_raw.json."""
-    filepath = Path(__file__).parent.parent / "data" / "raw" / "carts_raw.json"
-    if not filepath.exists():
-        pytest.skip(f"Raw file not found: {filepath} - run extract step first")
-    with open(filepath, "r") as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def raw_countries():
-    """Load raw countries JSON from data/raw/countries_raw.json."""
-    filepath = Path(__file__).parent.parent / "data" / "raw" / "countries_raw.json"
-    if not filepath.exists():
-        pytest.skip(f"Raw file not found: {filepath} - run extract step first")
-    with open(filepath, "r") as f:
-        return json.load(f)
-
-
-# ============================================================================
-# STAGED DATA FIXTURES (from transform layer)
-# ============================================================================
-
-@pytest.fixture
-def staged_products():
-    """Load staged products CSV from data/staged/products.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "staged" / "products.csv"
-    if not filepath.exists():
-        pytest.skip(f"Staged file not found: {filepath} - run transform step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def staged_customers():
-    """Load staged customers CSV from data/staged/customers.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "staged" / "customers.csv"
-    if not filepath.exists():
-        pytest.skip(f"Staged file not found: {filepath} - run transform step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def staged_orders():
-    """Load staged orders CSV from data/staged/orders.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "staged" / "orders.csv"
-    if not filepath.exists():
-        pytest.skip(f"Staged file not found: {filepath} - run transform step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def staged_order_items():
-    """Load staged order_items CSV from data/staged/order_items.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "staged" / "order_items.csv"
-    if not filepath.exists():
-        pytest.skip(f"Staged file not found: {filepath} - run transform step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def staged_countries():
-    """Load staged countries CSV from data/staged/countries.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "staged" / "countries.csv"
-    if not filepath.exists():
-        pytest.skip(f"Staged file not found: {filepath} - run transform step first")
-    return pl.read_csv(filepath)
-
-
-# ============================================================================
-# MART DATA FIXTURES (from load layer)
-# ============================================================================
-
-@pytest.fixture
-def mart_order_summary():
-    """Load mart order_summary CSV from data/marts/order_summary.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "marts" / "order_summary.csv"
-    if not filepath.exists():
-        pytest.skip(f"Mart file not found: {filepath} - run load step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def mart_customer_ltv():
-    """Load mart customer_ltv CSV from data/marts/customer_ltv.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "marts" / "customer_ltv.csv"
-    if not filepath.exists():
-        pytest.skip(f"Mart file not found: {filepath} - run load step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def mart_category_revenue():
-    """Load mart category_revenue CSV from data/marts/category_revenue.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "marts" / "category_revenue.csv"
-    if not filepath.exists():
-        pytest.skip(f"Mart file not found: {filepath} - run load step first")
-    return pl.read_csv(filepath)
-
-
-@pytest.fixture
-def mart_monthly_trend():
-    """Load mart monthly_trend CSV from data/marts/monthly_trend.csv."""
-    filepath = Path(__file__).parent.parent / "data" / "marts" / "monthly_trend.csv"
-    if not filepath.exists():
-        pytest.skip(f"Mart file not found: {filepath} - run load step first")
-    return pl.read_csv(filepath)
+    # Bronze: fetch only the missing tables.
+    for name, fn in extract.TASKS.items():
+        if not path_for("bronze", name).exists():
+            fn()
+    silver_runner.run_all()
+    intermediate_runner.run_all()
+    marts_runner.run_all()
+    yield
