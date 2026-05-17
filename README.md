@@ -222,6 +222,155 @@ Environment variables:
 
 Data is fetched from the [Jolpica Ergast mirror](https://api.jolpi.ca/ergast/f1) — the maintained successor to the deprecated `ergast.com` API. Free, no auth, ~4 req/s rate limit (the client throttles automatically).
 
+## Future Plans / Requirements
+
+> The following section captures planned but not-yet-implemented work. It is written for future contributors (human or AI agents) to pick up and implement directly. Items are scoped, ordered, and include file-level hooks. **All data-frame work below must use Polars** (no pandas); persistence must use **Polars parquet writers** and the existing **DuckDB** facade.
+
+### 1. Pipeline run-history (logging table)
+
+Persist the execution history of every pipeline invocation so failures, durations, and row-counts at each step are queryable after the fact. Today there is no run-level or step-level history anywhere — `common/logging_setup.py` only configures `logging.basicConfig`, and `scripts/run_pipeline.py` uses `print(...)` for timings.
+
+#### Storage strategy (Polars parquet + DuckDB views)
+
+- Write **append-only parquet** under a new `data/_meta/` directory using `pl.DataFrame.write_parquet` (mirroring the existing pattern in [common/io.py](common/io.py)). One file per run, partitioned by `run_id`:
+  - `data/_meta/pipeline_runs/run_id=<uuid>.parquet`
+  - `data/_meta/pipeline_steps/run_id=<uuid>.parquet`
+  - `data/_meta/logs/pipeline.log` (rotating text log, see §3)
+- Expose both tables as **DuckDB views** in a new `_meta` schema inside `data/lake.duckdb`, mirroring the existing view-over-parquet pattern in [scripts/build_duckdb.py](scripts/build_duckdb.py):
+  ```sql
+  CREATE SCHEMA IF NOT EXISTS _meta;
+  CREATE OR REPLACE VIEW _meta.pipeline_runs  AS
+    SELECT * FROM read_parquet('data/_meta/pipeline_runs/*.parquet',  union_by_name=true);
+  CREATE OR REPLACE VIEW _meta.pipeline_steps AS
+    SELECT * FROM read_parquet('data/_meta/pipeline_steps/*.parquet', union_by_name=true);
+  ```
+  Guard the view creation so it skips cleanly when `data/_meta/` is empty (first-run case).
+- Add `META_DIR = LAKE_DIR / "_meta"` to [config.py](config.py) and include it in the existing `_ensure_dirs` helper.
+
+#### Schema
+
+`pipeline_runs` — one row per `python -m scripts.run_pipeline` invocation:
+
+| Column | Type | Notes |
+|---|---|---|
+| `run_id` | `Utf8` | UUID4, generated at run start |
+| `started_at` | `Datetime` | UTC |
+| `ended_at` | `Datetime` | UTC, nullable until finish |
+| `status` | `Utf8` | `running` \| `succeeded` \| `failed` |
+| `selected_layer` | `Utf8` | nullable; value of `--layer` if set |
+| `skip_flags` | `Utf8` | JSON-encoded dict of skip booleans |
+| `seasons` | `Utf8` | comma-joined value of `SEASONS` env |
+| `total_seconds` | `Float64` | nullable until finish |
+| `error_message` | `Utf8` | nullable |
+| `git_sha` | `Utf8` | best-effort `git rev-parse HEAD`; nullable |
+| `host` | `Utf8` | `socket.gethostname()` |
+| `python_version` | `Utf8` | `sys.version.split()[0]` |
+
+`pipeline_steps` — one row per task within a layer:
+
+| Column | Type | Notes |
+|---|---|---|
+| `run_id` | `Utf8` | FK to `pipeline_runs.run_id` |
+| `layer` | `Utf8` | `bronze` \| `silver` \| `intermediate` \| `marts` \| `reports` \| `duckdb` |
+| `step_name` | `Utf8` | task name (e.g. `lap_times`, `season_summary`, `build`) |
+| `started_at` | `Datetime` | UTC |
+| `ended_at` | `Datetime` | UTC |
+| `duration_ms` | `Int64` | |
+| `status` | `Utf8` | `succeeded` \| `failed` \| `skipped` |
+| `rows_written` | `Int64` | nullable; set by the task via recorder |
+| `output_path` | `Utf8` | nullable; set by the task via recorder |
+| `error_type` | `Utf8` | nullable |
+| `error_message` | `Utf8` | nullable |
+| `traceback_text` | `Utf8` | nullable; full `traceback.format_exc()` on failure |
+
+#### Granularity
+
+Per-task within each layer (not just per-layer):
+- bronze → one row per endpoint in `bronze.extract.TASKS`
+- silver → one row per table in `silver.runner.TASKS`
+- intermediate → one row per task in `intermediate.runner.TASKS`
+- marts → one row per task in `marts.runner.TASKS`
+- reports → one row per CSV written in `analytics.write_reports`
+- duckdb → one row (`step_name='build'`)
+
+#### Failure semantics
+
+**Preserve current abort-on-failure behaviour.** On a step exception: record the row with `status='failed'` + populated `error_*` / `traceback_text`, mark the run row `failed`, flush both parquet files, then **re-raise**. Downstream layers must not execute. (A future opt-in `--continue-on-error` flag is explicitly out of scope here.)
+
+#### New module: `common/run_history.py`
+
+Provide a small, Polars-native API:
+
+```python
+class RunRecorder:
+    run_id: str
+    def step(self, layer: str, step_name: str) -> "StepContext": ...  # context manager
+    def finish(self, status: str, error: BaseException | None = None) -> None: ...
+
+def start_run(selected_layer: str | None, skip_flags: dict, seasons: str) -> RunRecorder: ...
+```
+
+- `recorder.step(...)` is a context manager that captures `started_at`, times the block, on exception records `failed` + traceback and re-raises, on success records `succeeded`.
+- The yielded `StepContext` exposes `.set_rows(n)` and `.set_output(path)` so each task can attach metadata.
+- `finish(...)` builds two `pl.DataFrame` objects (one row of run, N rows of steps) with explicit `schema=` for stable column types, then calls `pl.DataFrame.write_parquet(META_DIR / "pipeline_runs"  / f"run_id={run_id}.parquet")` and the equivalent for steps.
+
+#### Instrumentation points
+
+Thread an **optional** `recorder: RunRecorder | None = None` argument through each `run_all` (optional → keeps direct callers and existing tests untouched):
+
+- [bronze/extract.py](bronze/extract.py) `run_all` — wrap each entry in `TASKS` (~L249) with `recorder.step("bronze", name)` inside the loop at ~L266.
+- [silver/runner.py](silver/runner.py) `run_all` (~L39) — wrap each entry in `TASKS` (~L22) with `recorder.step("silver", name)`.
+- [intermediate/runner.py](intermediate/runner.py) `run_all` (~L29) — wrap each entry in `TASKS` (~L17) with `recorder.step("intermediate", name)`.
+- [marts/runner.py](marts/runner.py) `run_all` (~L29) — wrap each entry in `TASKS` (~L16) with `recorder.step("marts", name)`.
+- [analytics/__init__.py](analytics/__init__.py) `write_reports` (~L40) — wrap each per-report write in `recorder.step("reports", <name>)`.
+- [scripts/run_pipeline.py](scripts/run_pipeline.py) `main` (~L29):
+  - Generate `run_id`, call `start_run(...)` at the top.
+  - Pass `recorder` into each `_run` call (~L53–L57) and into `write_reports`.
+  - Wrap the optional DuckDB build block (~L59–L65) in `recorder.step("duckdb", "build")`.
+  - On any exception: `recorder.finish("failed", error=e)` then re-raise.
+  - On success: `recorder.finish("succeeded")`.
+
+#### DuckDB facade update
+
+In [scripts/build_duckdb.py](scripts/build_duckdb.py), after the existing schema/view block (~L48 / ~L69), create the `_meta` schema and views described above. The DB file stays a thin facade over parquet — no run history is ever written *into* DuckDB directly; DuckDB only reads the parquet files produced by `RunRecorder.finish`.
+
+### 2. Logging upgrade (file sink + replace `print`)
+
+- Extend [common/logging_setup.py](common/logging_setup.py): keep the existing `basicConfig` stream handler, **add** a `logging.handlers.RotatingFileHandler` writing to `data/_meta/logs/pipeline.log` (5 MB × 5 backups). Controllable via `LOG_FILE` env var; setting `LOG_FILE=""` disables the file sink. The `setup_logging()` signature must not change.
+- Replace remaining `print(...)` calls in [scripts/run_pipeline.py](scripts/run_pipeline.py) (~L51, ~L64, ~L68) with `logger.info(...)`.
+- Document the new env var alongside `SEASONS` / `LOG_LEVEL` in the Configuration section above.
+
+### 3. Test coverage gaps
+
+Add focused tests (existing tests must continue to pass unchanged because `recorder` is optional):
+
+- `tests/common/test_run_history.py` — successful run writes both parquet files with expected Polars schema; failed step records `failed` + traceback and re-raises; `set_rows` / `set_output` propagate.
+- `tests/scripts/test_run_pipeline.py` — monkeypatch each `run_all` to a no-op, assert one `succeeded` `pipeline_runs` row and the expected `pipeline_steps` rows per layer; monkeypatch one `run_all` to raise, assert run is `failed`, exception propagates, and the failing step row is persisted.
+- `tests/common/test_io.py` — round-trip coverage for `lake_path`, `write_parquet`, `scan_parquet` (closes a real gap: `common/io.py` has no direct tests today).
+- (Stretch) `tests/common/test_ergast_client.py` — retry/throttle behaviour of [common/ergast_client.py](common/ergast_client.py) with a mocked HTTP layer.
+
+### 4. Verification checklist
+
+1. `pytest -q` — all existing + new tests pass.
+2. Skip-everything run (`--skip-bronze --skip-silver --skip-intermediate --skip-marts`) produces one `pipeline_runs` row with `status='succeeded'`.
+3. Full run writes one run row + N task rows (bronze endpoints + silver tables + intermediate + marts + reports + `duckdb.build`).
+4. Inject a raise in one silver task → run row `failed`, that step row has `failed` + non-empty `traceback_text`, exit non-zero, downstream layers not executed.
+5. After `python -m scripts.build_duckdb`:
+   ```
+   duckdb data/lake.duckdb -c "SELECT layer, status, COUNT(*) FROM _meta.pipeline_steps GROUP BY 1,2 ORDER BY 1,2"
+   ```
+   returns rows grouped by layer × status.
+6. `data/_meta/logs/pipeline.log` is created and rotates when oversized.
+
+### 5. Explicitly out of scope (deferred follow-ups)
+
+- Orchestrator-level retry policy for transform steps (HTTP retries already live in [common/ergast_client.py](common/ergast_client.py)).
+- `--continue-on-error` mode and partial-success run status.
+- Threading the recorder into bronze's per-race tolerant blocks (pit stops, laps, sprint) to surface their warn-and-skip events as `status='skipped'` step rows.
+- Structured/JSON logging or replacing `logging.basicConfig`.
+- Retention/pruning of `data/_meta/` parquet files (tiny, ~1 file per run).
+- Any dashboard or web UI over run history.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
